@@ -1,7 +1,7 @@
 /*
  * tunnel.c - Setup a local port forwarding through remote shadowsocks server
  *
- * Copyright (C) 2013 - 2014, Max Lv <max.c.lv@gmail.com>
+ * Copyright (C) 2013 - 2015, Max Lv <max.c.lv@gmail.com>
  *
  * This file is part of the shadowsocks-libev.
  *
@@ -16,7 +16,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with pdnsd; see the file COPYING. If not, see
+ * along with shadowsocks-libev; see the file COPYING. If not, see
  * <http://www.gnu.org/licenses/>.
  */
 
@@ -52,6 +52,10 @@
 #include "win32.h"
 #endif
 
+#include <libcork/core.h>
+#include <udns.h>
+
+#include "netutils.h"
 #include "utils.h"
 #include "tunnel.h"
 
@@ -119,7 +123,7 @@ int create_and_bind(const char *addr, const char *port)
 
     s = getaddrinfo(addr, port, &hints, &result);
     if (s != 0) {
-        LOGD("getaddrinfo: %s", gai_strerror(s));
+        LOGI("getaddrinfo: %s", gai_strerror(s));
         return -1;
     }
 
@@ -276,7 +280,7 @@ static void remote_timeout_cb(EV_P_ ev_timer *watcher, int revents)
     struct server *server = remote->server;
 
     if (verbose) {
-        LOGD("TCP connection timeout");
+        LOGI("TCP connection timeout");
     }
 
     ev_timer_stop(EV_A_ watcher);
@@ -364,27 +368,56 @@ static void remote_send_cb(EV_P_ ev_io *w, int revents)
     struct server *server = remote->server;
 
     if (!remote_send_ctx->connected) {
-
         struct sockaddr_storage addr;
         socklen_t len = sizeof addr;
+
         int r = getpeername(remote->fd, (struct sockaddr *)&addr, &len);
         if (r == 0) {
             remote_send_ctx->connected = 1;
             ev_io_stop(EV_A_ & remote_send_ctx->io);
             ev_timer_stop(EV_A_ & remote_send_ctx->watcher);
-
-            // send destaddr
             char *ss_addr_to_send = malloc(BUF_SIZE);
             ssize_t addr_len = 0;
-            ss_addr_t *sa = &server->destaddr;
-            int host_len = strlen(sa->host);
-            uint16_t port = htons(atoi(sa->port));
 
-            // treat as domain
-            ss_addr_to_send[addr_len++] = 3;
-            ss_addr_to_send[addr_len++] = host_len;
-            memcpy(ss_addr_to_send + addr_len, sa->host, host_len);
-            addr_len += host_len;
+            ss_addr_t *sa = &server->destaddr;
+            struct cork_ip ip;
+            if (cork_ip_init(&ip, sa->host) != -1) {
+                if (ip.version == 4) {
+                    // send as IPv4
+                    struct in_addr host;
+                    int host_len = sizeof(struct in_addr);
+
+                    if (dns_pton(AF_INET, sa->host, &host) == -1) {
+                        FATAL("IP parser error.");
+                    }
+                    ss_addr_to_send[addr_len++] = 1;
+                    memcpy(ss_addr_to_send + addr_len, &host, host_len);
+                    addr_len += host_len;
+                } else if (ip.version == 6) {
+                    // send as IPv6
+                    struct in6_addr host;
+                    int host_len = sizeof(struct in6_addr);
+
+                    if (dns_pton(AF_INET6, sa->host, &host) == -1) {
+                        FATAL("IP parser error.");
+                    }
+                    ss_addr_to_send[addr_len++] = 4;
+                    memcpy(ss_addr_to_send + addr_len, &host, host_len);
+                    addr_len += host_len;
+                } else {
+                    FATAL("IP parser error.");
+                }
+            } else {
+                // send as domain
+                int host_len = strlen(sa->host);
+
+                ss_addr_to_send[addr_len++] = 3;
+                ss_addr_to_send[addr_len++] = host_len;
+                memcpy(ss_addr_to_send + addr_len, sa->host, host_len);
+                addr_len += host_len;
+            }
+
+            uint16_t port = htons(atoi(sa->port));
             memcpy(ss_addr_to_send + addr_len, &port, 2);
             addr_len += 2;
 
@@ -577,54 +610,40 @@ static void accept_cb(EV_P_ ev_io *w, int revents)
         return;
     }
     setnonblocking(serverfd);
-#ifdef SO_NOSIGPIPE
     int opt = 1;
+    setsockopt(serverfd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
+#ifdef SO_NOSIGPIPE
     setsockopt(serverfd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 #endif
 
-    struct addrinfo hints, *res;
-    int sockfd;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
     int index = rand() % listener->remote_num;
-    if (verbose) {
-        LOGD("connect to %s:%s", listener->remote_addr[index].host,
-             listener->remote_addr[index].port);
-    }
-    int err = getaddrinfo(listener->remote_addr[index].host,
-                          listener->remote_addr[index].port, &hints, &res);
-    if (err) {
-        ERROR("getaddrinfo");
-        return;
-    }
+    struct sockaddr *remote_addr = listener->remote_addr[index];
 
-    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sockfd < 0) {
+    int remotefd = socket(remote_addr->sa_family, SOCK_STREAM, IPPROTO_TCP);
+    if (remotefd < 0) {
         ERROR("socket");
-        freeaddrinfo(res);
         return;
     }
 
+    setsockopt(remotefd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
 #ifdef SO_NOSIGPIPE
-    setsockopt(sockfd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+    setsockopt(remotefd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 #endif
 
     // Setup
-    setnonblocking(sockfd);
+    setnonblocking(remotefd);
 #ifdef SET_INTERFACE
     if (listener->iface) {
-        setinterface(sockfd, listener->iface);
+        setinterface(remotefd, listener->iface);
     }
 #endif
 
     struct server *server = new_server(serverfd, listener->method);
-    struct remote *remote = new_remote(sockfd, listener->timeout);
+    struct remote *remote = new_remote(remotefd, listener->timeout);
     server->destaddr = listener->tunnel_addr;
     server->remote = remote;
     remote->server = server;
-    connect(sockfd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
+    connect(remotefd, remote_addr, get_sockaddr_len(remote_addr));
     // listen to remote connected event
     ev_io_start(EV_A_ & remote->send_ctx->io);
     ev_timer_start(EV_A_ & remote->send_ctx->watcher);
@@ -771,7 +790,7 @@ int main(int argc, char **argv)
 #endif
 
     // Setup keys
-    LOGD("initialize ciphers... %s", method);
+    LOGI("initialize ciphers... %s", method);
     int m = enc_init(password, method);
 
     // Setup socket
@@ -784,37 +803,38 @@ int main(int argc, char **argv)
         FATAL("listen() error.");
     }
     setnonblocking(listenfd);
-    LOGD("server listening at port %s.", local_port);
+    LOGI("server listening at port %s.", local_port);
 
     // Setup proxy context
     struct listen_ctx listen_ctx;
     listen_ctx.tunnel_addr = tunnel_addr;
     listen_ctx.remote_num = remote_num;
-    listen_ctx.remote_addr = malloc(sizeof(ss_addr_t) * remote_num);
-    while (remote_num > 0) {
-        int index = --remote_num;
-        if (remote_addr[index].port == NULL) {
-            remote_addr[index].port = remote_port;
+    listen_ctx.remote_addr = malloc(sizeof(struct sockaddr *) * remote_num);
+    for (i = 0; i < remote_num; i++) {
+        char *host = remote_addr[i].host;
+        char *port = remote_addr[i].port == NULL ? remote_port :
+            remote_addr[i].port;
+        struct sockaddr_storage *storage = malloc(sizeof(struct sockaddr_storage));
+        memset(storage, 0, sizeof(struct sockaddr_storage));
+        if (get_sockaddr(host, port, storage) == -1) {
+            FATAL("failed to resolve the provided hostname");
         }
-        listen_ctx.remote_addr[index] = remote_addr[index];
+        listen_ctx.remote_addr[i] = (struct sockaddr *)storage;
     }
     listen_ctx.timeout = atoi(timeout);
     listen_ctx.fd = listenfd;
     listen_ctx.iface = iface;
     listen_ctx.method = m;
 
-    struct ev_loop *loop = ev_default_loop(0);
-    if (!loop) {
-        FATAL("ev_loop error.");
-    }
+    struct ev_loop *loop = EV_DEFAULT;
     ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
     ev_io_start(loop, &listen_ctx.io);
 
     // Setup UDP
     if (udprelay) {
-        LOGD("udprelay enabled.");
-        init_udprelay(local_addr, local_port, remote_addr[0].host,
-                      remote_addr[0].port,
+        LOGI("udprelay enabled");
+        init_udprelay(local_addr, local_port, listen_ctx.remote_addr[0],
+                      get_sockaddr_len(listen_ctx.remote_addr[0]),
                       tunnel_addr, m, listen_ctx.timeout, iface);
     }
 

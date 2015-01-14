@@ -1,7 +1,7 @@
 /*
  * jconf.c - Parse the JSON format config file
  *
- * Copyright (C) 2013 - 2014, Max Lv <max.c.lv@gmail.com>
+ * Copyright (C) 2013 - 2015, Max Lv <max.c.lv@gmail.com>
  *
  * This file is part of the shadowsocks-libev.
  * shadowsocks-libev is free software; you can redistribute it and/or modify
@@ -15,7 +15,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with pdnsd; see the file COPYING. If not, see
+ * along with shadowsocks-libev; see the file COPYING. If not, see
  * <http://www.gnu.org/licenses/>.
  */
 
@@ -168,6 +168,8 @@ jconf_t *read_jconf(const char * file)
                 conf.fast_open = value->u.boolean;
             } else if (strcmp(name, "nofile") == 0) {
                 conf.nofile = value->u.integer;
+            } else if (strcmp(name, "nameserver") == 0) {
+                conf.nameserver = to_string(value);
             }
         }
     } else {

@@ -11,7 +11,7 @@ It is a port of [shadowsocks](https://github.com/shadowsocks/shadowsocks)
 created by [@clowwindy](https://github.com/clowwindy) maintained by 
 [@madeye](https://github.com/madeye) and [@linusyang](https://github.com/linusyang).
 
-Current version: 1.6.1 | [![Build Status](https://travis-ci.org/shadowsocks/shadowsocks-libev.png?branch=master)](https://travis-ci.org/shadowsocks/shadowsocks-libev) | [Changelog](Changes)
+Current version: 2.0.7 | [![Build Status](https://travis-ci.org/shadowsocks/shadowsocks-libev.png?branch=master)](https://travis-ci.org/shadowsocks/shadowsocks-libev) | [Changelog](Changes)
 
 Features
 --------
@@ -39,6 +39,13 @@ CAST5-CFB, DES-CFB, IDEA-CFB, RC2-CFB and SEED-CFB.
 ### Debian & Ubuntu
 
 #### Install from repository
+
+Add GPG public key
+
+```bash
+wget -O- http://shadowsocks.org/debian/1D27208A.gpg | sudo apt-key add -
+```
+
 Add either of the following lines to your /etc/apt/sources.list
 
 ```
@@ -79,7 +86,7 @@ sudo /etc/init.d/shadowsocks-libev start
 ### Fedora & RHEL
 
 Supported distributions include
-- Fedora 19, 20, 21, rawhide
+- Fedora 20, 21, rawhide
 - RHEL 6, 7 and derivatives (including CentOS, Scientific Linux)
 
 #### Install from repository
@@ -217,8 +224,8 @@ usage:
           [-m <encrypt_method>]      encrypt method: table, rc4, rc4-md5
                                      aes-128-cfb, aes-192-cfb, aes-256-cfb,
                                      bf-cfb, camellia-128-cfb, camellia-192-cfb,
-                                     camellia-256-cfb, cast5-cfb, des-cfb,
-                                     idea-cfb, rc2-cfb and seed-cfb
+                                     camellia-256-cfb, cast5-cfb, des-cfb, idea-cfb,
+                                     rc2-cfb, seed-cfb, salsa20 and chacha20
           [-f <pid_file>]            file to store the pid
           [-t <timeout>]             socket timeout in seconds
           [-c <config_file>]         config file in json
@@ -232,6 +239,8 @@ usage:
                                      not available in redir mode
           [-L <addr>:<port>]         setup a local port forwarding tunnel,
                                      only available in tunnel mode
+          [-d <addr>]                setup name servers for internal DNS resolver,
+                                     only available in server mode
           [-v]                       verbose mode
 
 

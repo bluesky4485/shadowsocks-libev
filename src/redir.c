@@ -2,7 +2,7 @@
  * redir.c - Provide a transparent TCP proxy through remote shadowsocks
  *            server
  *
- * Copyright (C) 2013 - 2014, Max Lv <max.c.lv@gmail.com>
+ * Copyright (C) 2013 - 2015, Max Lv <max.c.lv@gmail.com>
  *
  * This file is part of the shadowsocks-libev.
  *
@@ -17,7 +17,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with pdnsd; see the file COPYING. If not, see
+ * along with shadowsocks-libev; see the file COPYING. If not, see
  * <http://www.gnu.org/licenses/>.
  */
 
@@ -45,6 +45,7 @@
 #include "config.h"
 #endif
 
+#include "netutils.h"
 #include "utils.h"
 #include "redir.h"
 
@@ -115,7 +116,7 @@ int create_and_bind(const char *addr, const char *port)
 
     s = getaddrinfo(addr, port, &hints, &result);
     if (s != 0) {
-        LOGD("getaddrinfo: %s", gai_strerror(s));
+        LOGI("getaddrinfo: %s", gai_strerror(s));
         return -1;
     }
 
@@ -158,21 +159,14 @@ static void server_recv_cb(EV_P_ ev_io *w, int revents)
     struct server *server = server_recv_ctx->server;
     struct remote *remote = server->remote;
 
-    if (remote == NULL) {
-        close_and_free_server(EV_A_ server);
-        return;
-    }
-
     ssize_t r = recv(server->fd, remote->buf, BUF_SIZE, 0);
 
     if (r == 0) {
         // connection closed
         remote->buf_len = 0;
         remote->buf_idx = 0;
+        close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
-        if (remote != NULL) {
-            ev_io_start(EV_A_ & remote->send_ctx->io);
-        }
         return;
     } else if (r < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -251,13 +245,7 @@ static void server_send_cb(EV_P_ ev_io *w, int revents)
             server->buf_len = 0;
             server->buf_idx = 0;
             ev_io_stop(EV_A_ & server_send_ctx->io);
-            if (remote != NULL) {
-                ev_io_start(EV_A_ & remote->recv_ctx->io);
-            } else {
-                close_and_free_remote(EV_A_ remote);
-                close_and_free_server(EV_A_ server);
-                return;
-            }
+            ev_io_start(EV_A_ & remote->recv_ctx->io);
         }
     }
 
@@ -272,10 +260,6 @@ static void remote_timeout_cb(EV_P_ ev_timer *watcher, int revents)
 
     ev_timer_stop(EV_A_ watcher);
 
-    if (server == NULL) {
-        close_and_free_remote(EV_A_ remote);
-        return;
-    }
     close_and_free_remote(EV_A_ remote);
     close_and_free_server(EV_A_ server);
 }
@@ -285,10 +269,6 @@ static void remote_recv_cb(EV_P_ ev_io *w, int revents)
     struct remote_ctx *remote_recv_ctx = (struct remote_ctx *)w;
     struct remote *remote = remote_recv_ctx->remote;
     struct server *server = remote->server;
-    if (server == NULL) {
-        close_and_free_remote(EV_A_ remote);
-        return;
-    }
 
     ssize_t r = recv(remote->fd, server->buf, BUF_SIZE, 0);
 
@@ -297,9 +277,7 @@ static void remote_recv_cb(EV_P_ ev_io *w, int revents)
         server->buf_len = 0;
         server->buf_idx = 0;
         close_and_free_remote(EV_A_ remote);
-        if (server != NULL) {
-            ev_io_start(EV_A_ & server->send_ctx->io);
-        }
+        close_and_free_server(EV_A_ server);
         return;
     } else if (r < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -402,9 +380,10 @@ static void remote_send_cb(EV_P_ ev_io *w, int revents)
             free(ss_addr_to_send);
 
             if (s < addr_len) {
-                LOGE("failed to send remote addr.");
+                LOGE("failed to send addr");
                 close_and_free_remote(EV_A_ remote);
                 close_and_free_server(EV_A_ server);
+                return;
             }
 
             ev_io_start(EV_A_ & server->recv_ctx->io);
@@ -446,13 +425,7 @@ static void remote_send_cb(EV_P_ ev_io *w, int revents)
                 remote->buf_len = 0;
                 remote->buf_idx = 0;
                 ev_io_stop(EV_A_ & remote_send_ctx->io);
-                if (server != NULL) {
-                    ev_io_start(EV_A_ & server->recv_ctx->io);
-                } else {
-                    close_and_free_remote(EV_A_ remote);
-                    close_and_free_server(EV_A_ server);
-                    return;
-                }
+                ev_io_start(EV_A_ & server->recv_ctx->io);
             }
         }
 
@@ -573,60 +546,49 @@ static void accept_cb(EV_P_ ev_io *w, int revents)
     struct sockaddr_storage destaddr;
     int err;
 
-    int clientfd = accept(listener->fd, NULL, NULL);
-    if (clientfd == -1) {
+    int serverfd = accept(listener->fd, NULL, NULL);
+    if (serverfd == -1) {
         ERROR("accept");
         return;
     }
 
-    err = getdestaddr(clientfd, &destaddr);
+    err = getdestaddr(serverfd, &destaddr);
     if (err) {
         ERROR("getdestaddr");
         return;
     }
 
-    setnonblocking(clientfd);
-#ifdef SO_NOSIGPIPE
+    setnonblocking(serverfd);
     int opt = 1;
-    setsockopt(clientfd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+    setsockopt(serverfd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
+#ifdef SO_NOSIGPIPE
+    setsockopt(serverfd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 #endif
 
-    struct addrinfo hints, *res;
-    int sockfd;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
     int index = rand() % listener->remote_num;
-    err =
-        getaddrinfo(listener->remote_addr[index].host,
-                    listener->remote_addr[index].port, &hints, &res);
-    if (err) {
-        ERROR("getaddrinfo");
-        return;
-    }
+    struct sockaddr *remote_addr = listener->remote_addr[index];
 
-    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sockfd < 0) {
+    int remotefd = socket(remote_addr->sa_family, SOCK_STREAM, IPPROTO_TCP);
+    if (remotefd < 0) {
         ERROR("socket");
-        freeaddrinfo(res);
         return;
     }
 
+    setsockopt(remotefd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
 #ifdef SO_NOSIGPIPE
-    setsockopt(sockfd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+    setsockopt(remotefd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 #endif
 
     // Setup
-    setnonblocking(sockfd);
+    setnonblocking(remotefd);
 
-    struct server *server = new_server(clientfd, listener->method);
-    struct remote *remote = new_remote(sockfd, listener->timeout);
+    struct server *server = new_server(serverfd, listener->method);
+    struct remote *remote = new_remote(remotefd, listener->timeout);
     server->remote = remote;
     remote->server = server;
     server->destaddr = destaddr;
 
-    connect(sockfd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
+    connect(remotefd, remote_addr, get_sockaddr_len(remote_addr));
     // listen to remote connected event
     ev_io_start(EV_A_ & remote->send_ctx->io);
     ev_timer_start(EV_A_ & remote->send_ctx->watcher);
@@ -746,7 +708,7 @@ int main(int argc, char **argv)
     signal(SIGABRT, SIG_IGN);
 
     // Setup keys
-    LOGD("initialize ciphers... %s", method);
+    LOGI("initialize ciphers... %s", method);
     int m = enc_init(password, method);
 
     // Setup socket
@@ -759,27 +721,28 @@ int main(int argc, char **argv)
         FATAL("listen() error.");
     }
     setnonblocking(listenfd);
-    LOGD("server listening at port %s.", local_port);
+    LOGI("server listening at port %s", local_port);
 
     // Setup proxy context
     struct listen_ctx listen_ctx;
     listen_ctx.remote_num = remote_num;
-    listen_ctx.remote_addr = malloc(sizeof(ss_addr_t) * remote_num);
-    while (remote_num > 0) {
-        int index = --remote_num;
-        if (remote_addr[index].port == NULL) {
-            remote_addr[index].port = remote_port;
+    listen_ctx.remote_addr = malloc(sizeof(struct sockaddr *) * remote_num);
+    for (int i = 0; i < remote_num; i++) {
+        char *host = remote_addr[i].host;
+        char *port = remote_addr[i].port == NULL ? remote_port :
+            remote_addr[i].port;
+        struct sockaddr_storage *storage = malloc(sizeof(struct sockaddr_storage));
+        memset(storage, 0, sizeof(struct sockaddr_storage));
+        if (get_sockaddr(host, port, storage) == -1) {
+            FATAL("failed to resolve the provided hostname");
         }
-        listen_ctx.remote_addr[index] = remote_addr[index];
+        listen_ctx.remote_addr[i] = (struct sockaddr *)storage;
     }
     listen_ctx.timeout = atoi(timeout);
     listen_ctx.fd = listenfd;
     listen_ctx.method = m;
 
-    struct ev_loop *loop = ev_default_loop(0);
-    if (!loop) {
-        FATAL("ev_loop error.");
-    }
+    struct ev_loop *loop = EV_DEFAULT;
     ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
     ev_io_start(loop, &listen_ctx.io);
 

@@ -16,7 +16,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with pdnsd; see the file COPYING. If not, see
+ * along with shadowsocks-libev; see the file COPYING. If not, see
  * <http://www.gnu.org/licenses/>.
  */
 
@@ -31,7 +31,6 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include "utils.h"
 
 #ifdef EWOULDBLOCK
 #undef EWOULDBLOCK
